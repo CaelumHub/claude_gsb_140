@@ -304,17 +304,17 @@ export class CrdtClient {
    * @param {Map} shapes
    * @param {object[]} ops 叶子操作数组(commit 内部负责包 batch)
    */
-  commit(shapes, ops, { label = '' } = {}) {
+  commit(shapes, ops, { label = '', atomic = false } = {}) {
     const list = (Array.isArray(ops) ? ops : [ops]).filter(Boolean);
     if (!list.length) return null;
     const captured = snapshotAffected(shapes, list);
     mergeOps(shapes, list);
     const inverse = invertOps(list, captured);           // 语义逆操作
     const recipe = list.map(cloneOp);                    // 语义原操作(重做用)
-    this.undoStack.push({ undoOps: inverse, redoOps: recipe, label });
+    this.undoStack.push({ undoOps: inverse, redoOps: recipe, label, atomic });
     if (this.undoStack.length > this.maxDepth) this.undoStack.shift();
     this.redoStack.length = 0;
-    this._emit(list);
+    this._emit(list, { atomic });
     return list;
   }
 
@@ -326,9 +326,9 @@ export class CrdtClient {
     this._emit(list);
   }
 
-  _emit(list) {
+  _emit(list, { atomic = false } = {}) {
     if (!this.onOps) return;
-    if (list.length === 1) this.onOps(list);
+    if (list.length === 1 && !atomic) this.onOps(list);
     else this.onOps([{ ...this._next(), type: 'batch', ts: Date.now(), base_rev: 0, ops: list }]);
   }
 
@@ -341,9 +341,9 @@ export class CrdtClient {
     if (!entry) return null;
     const fresh = reissue(entry.undoOps, this);
     mergeOps(shapes, fresh);
-    this.redoStack.push({ redoOps: entry.redoOps, undoOps: entry.undoOps, label: entry.label });
+    this.redoStack.push({ redoOps: entry.redoOps, undoOps: entry.undoOps, label: entry.label, atomic: entry.atomic });
     if (this.redoStack.length > this.maxDepth) this.redoStack.shift();
-    this._emit(fresh);
+    this._emit(fresh, { atomic: entry.atomic });
     return entry;
   }
 
@@ -353,8 +353,8 @@ export class CrdtClient {
     if (!entry) return null;
     const fresh = reissue(entry.redoOps, this);
     mergeOps(shapes, fresh);
-    this.undoStack.push({ undoOps: entry.undoOps, redoOps: entry.redoOps, label: entry.label });
-    this._emit(fresh);
+    this.undoStack.push({ undoOps: entry.undoOps, redoOps: entry.redoOps, label: entry.label, atomic: entry.atomic });
+    this._emit(fresh, { atomic: entry.atomic });
     return entry;
   }
 

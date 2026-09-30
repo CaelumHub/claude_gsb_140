@@ -14,7 +14,7 @@
      方向键微移, Ctrl+] / Ctrl+[ 层级调整。
    ================================================================ */
 import {
-  bboxOf, centerOf, createShape, nextZ, syncZCounter, uidShape,
+  bboxOf, centerOf, createShape, nextZ, shapesBbox, syncZCounter, uidShape,
 } from './shapes.js';
 
 function stripPrivate(shape) {
@@ -746,9 +746,106 @@ export class ToolManager {
     this.crdt.commit(this.shapes, ops, { label: '微移' });
     for (const id of ids) {
       const shape = this.shapes.get(id);
-      if (shape) this.engine.gridIndex.refresh(shape);
+      if (shape) {
+        if (shape.kind === 'path') shape._pathDirty = true;
+        this.engine.gridIndex.refresh(shape);
+      }
     }
     this.engine.markDirty();
+  }
+
+  /** 对选中图形做对齐或等间距分布; 整个动作以一个原子 batch 提交和撤销。 */
+  alignSelection(action) {
+    if (this.readOnly) return false;
+    const items = [...this.engine.selection]
+      .map((id) => this.shapes.get(id))
+      .filter((s) => s && !s.deleted && s.kind !== 'edge' && s.kind !== 'ghost');
+    if (items.length < 2 || (action.startsWith('distribute-') && items.length < 3)) return false;
+
+    const withBox = items.map((shape) => ({ shape, b: bboxOf(shape) }));
+    const group = shapesBbox(items);
+    const targets = new Map();
+
+    const moveTo = (entry, dx = 0, dy = 0) => {
+      const cur = targets.get(entry.shape.id) || { dx: 0, dy: 0 };
+      cur.dx += dx;
+      cur.dy += dy;
+      targets.set(entry.shape.id, cur);
+    };
+
+    if (action === 'align-left' || action === 'align-h-center' || action === 'align-right') {
+      const getTarget = action === 'align-left'
+        ? () => group.x0
+        : action === 'align-right'
+          ? () => group.x1
+          : () => (group.x0 + group.x1) / 2;
+      for (const entry of withBox) {
+        const current = action === 'align-left' ? entry.b.x0
+          : action === 'align-right' ? entry.b.x1
+            : (entry.b.x0 + entry.b.x1) / 2;
+        moveTo(entry, getTarget() - current, 0);
+      }
+    } else if (action === 'align-top' || action === 'align-v-center' || action === 'align-bottom') {
+      const getTarget = action === 'align-top'
+        ? () => group.y0
+        : action === 'align-bottom'
+          ? () => group.y1
+          : () => (group.y0 + group.y1) / 2;
+      for (const entry of withBox) {
+        const current = action === 'align-top' ? entry.b.y0
+          : action === 'align-bottom' ? entry.b.y1
+            : (entry.b.y0 + entry.b.y1) / 2;
+        moveTo(entry, 0, getTarget() - current);
+      }
+    } else if (action === 'distribute-h' || action === 'distribute-v') {
+      const horizontal = action === 'distribute-h';
+      const sorted = [...withBox].sort((a, b) => {
+        const diff = horizontal ? a.b.x0 - b.b.x0 : a.b.y0 - b.b.y0;
+        return diff || String(a.shape.id).localeCompare(String(b.shape.id));
+      });
+      const start = horizontal ? sorted[0].b.x0 : sorted[0].b.y0;
+      const end = horizontal ? sorted[sorted.length - 1].b.x1 : sorted[sorted.length - 1].b.y1;
+      const fixedSize = sorted.reduce((sum, entry) => sum + (horizontal
+        ? entry.b.x1 - entry.b.x0
+        : entry.b.y1 - entry.b.y0), 0);
+      const gap = (end - start - fixedSize) / (sorted.length - 1);
+      let cursor = start;
+      for (const entry of sorted) {
+        const size = horizontal ? entry.b.x1 - entry.b.x0 : entry.b.y1 - entry.b.y0;
+        const current = horizontal ? entry.b.x0 : entry.b.y0;
+        if (horizontal) moveTo(entry, cursor - current, 0);
+        else moveTo(entry, 0, cursor - current);
+        cursor += size + gap;
+      }
+    } else {
+      return false;
+    }
+
+    const labels = {
+      'align-left': '左对齐', 'align-h-center': '水平居中', 'align-right': '右对齐',
+      'align-top': '顶对齐', 'align-v-center': '垂直居中', 'align-bottom': '底对齐',
+      'distribute-h': '水平等间距', 'distribute-v': '垂直等间距',
+    };
+    const ops = [];
+    for (const [id, delta] of targets) {
+      if (Math.abs(delta.dx) > 1e-6 || Math.abs(delta.dy) > 1e-6) {
+        ops.push(this.crdt.move(id, delta.dx, delta.dy));
+      }
+    }
+    if (!ops.length) return false;
+
+    this.crdt.commit(this.shapes, ops, { label: labels[action] || '对齐分布', atomic: true });
+    for (const id of targets.keys()) {
+      const shape = this.shapes.get(id);
+      if (shape) {
+        if (shape.kind === 'path') shape._pathDirty = true;
+        this.engine.gridIndex.refresh(shape);
+      }
+    }
+    this.engine.markDirty();
+    if (this.opts.onHistoryChange) this.opts.onHistoryChange();
+    if (this.opts.onSelectionChange) this.opts.onSelectionChange([...this.engine.selection]);
+    return true;
   }
 
   bring(where) {
