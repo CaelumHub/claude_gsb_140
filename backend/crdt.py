@@ -225,6 +225,23 @@ def sanitize_points(raw: Any) -> List[List[float]]:
     return pts
 
 
+def without_transient_ops(op: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """返回只包含持久化操作的副本; 纯实时操作返回 None。
+
+    transient move 用于拖拽过程中的实时光标同步。它必须广播给在线用户,
+    但不能写入操作日志: pointerup 的最终位置以状态快照保存, 断线补发
+    也应从最新状态出发, 而不是重放大量中间帧。
+    """
+    if op.get("type") != "batch":
+        return None if op.get("transient") is True else op
+    subs = [s for s in op.get("ops", []) if s.get("transient") is not True]
+    if not subs:
+        return None
+    clean = dict(op)
+    clean["ops"] = subs
+    return clean
+
+
 def validate_op(op: Any) -> Optional[Dict[str, Any]]:
     """校验并规范化客户端提交的操作; 非法返回 None。"""
     if not isinstance(op, dict):
@@ -277,9 +294,11 @@ def validate_op(op: Any) -> Optional[Dict[str, Any]]:
         dy = _finite_number(op.get("dy"))
         if not target or dx is None or dy is None:
             return None
-        if dx == 0 or dy == 0:
+        if dx == 0 and dy == 0:
             return None                            # 空移动直接丢弃
         clean.update({"id": target, "dx": dx, "dy": dy})
+        if op.get("transient") is True:
+            clean["transient"] = True
     elif op_type == "set_props":
         target = str(op.get("id") or "")[:64]
         props = sanitize_props(op.get("props") or {})
@@ -433,8 +452,8 @@ class BoardDoc:
 
         if kind == "move":
             # 增量对已删除图形同样累计(复活后位置正确, 且满足交换律)
-            shape["x"] = round(float(shape.get("x") or 0) + float(op["dy"]), 6)
-            shape["y"] = round(float(shape.get("y") or 0) + float(op["dx"]), 6)
+            shape["x"] = round(float(shape.get("x") or 0) + float(op["dx"]), 6)
+            shape["y"] = round(float(shape.get("y") or 0) + float(op["dy"]), 6)
             return True
 
         if kind == "path_extend":

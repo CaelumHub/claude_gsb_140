@@ -84,6 +84,16 @@
   .shortcut-table { width: 100%; font-size: 12.5px; border-collapse: collapse; }
   .shortcut-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-soft); }
   .shortcut-table td:first-child { white-space: nowrap; }
+
+  .arrange-panel { margin-top: 10px; }
+  .arrange-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
+    margin-top: 4px;
+  }
+  .arrange-grid button {
+    min-height: 30px; padding: 3px 2px; font-size: 11px; line-height: 1.15;
+    justify-content: center;
+  }
 </style>
 </head>
 <body>
@@ -150,6 +160,21 @@
           <button class="btn sm" data-act="back">⬇ 底层</button>
           <button class="btn sm" data-act="dup">🧬 副本</button>
           <button class="btn sm danger" data-act="del">🗑 删除</button>
+        </div>
+        <div class="arrange-panel" id="arrange-panel" style="display:none">
+          <label>排列</label>
+          <div class="arrange-grid" id="arrange-align">
+            <button class="btn sm ghost" data-arrange="left" title="左对齐">⫷ 左</button>
+            <button class="btn sm ghost" data-arrange="center-h" title="水平居中对齐(中心对齐到同一竖线)">↕ 居中</button>
+            <button class="btn sm ghost" data-arrange="right" title="右对齐">右 ⫸</button>
+            <button class="btn sm ghost" data-arrange="top" title="顶对齐">⇞ 顶</button>
+            <button class="btn sm ghost" data-arrange="center-v" title="垂直居中对齐(中心对齐到同一横线)">↔ 居中</button>
+            <button class="btn sm ghost" data-arrange="bottom" title="底对齐">底 ⇟</button>
+          </div>
+          <div class="arrange-grid" id="arrange-distribute" style="grid-template-columns:repeat(2,1fr)">
+            <button class="btn sm ghost" data-arrange="distribute-h" title="水平等间距分布">↔ 水平等距</button>
+            <button class="btn sm ghost" data-arrange="distribute-v" title="垂直等间距分布">↕ 垂直等距</button>
+          </div>
         </div>
       </div>
       <div class="divider"></div>
@@ -394,13 +419,20 @@ $('font-size').oninput = (e) => {
 function renderSelectionPanel() {
   const info = $('selection-info');
   const actions = $('selection-actions');
+  const arrange = $('arrange-panel');
   const sel = [...engine.selection].map((id) => shapes.get(id)).filter((s) => s && !s.deleted);
+  const movable = sel.filter((s) => s.kind !== 'edge' && s.kind !== 'ghost');
   if (!sel.length) {
     info.textContent = '未选择图形';
     actions.style.display = 'none';
+    arrange.style.display = 'none';
     return;
   }
   actions.style.display = 'flex';
+  arrange.style.display = movable.length >= 2 ? 'block' : 'none';
+  arrange.querySelectorAll('[data-arrange]').forEach((btn) => {
+    btn.disabled = btn.dataset.arrange.startsWith('distribute-') ? movable.length < 3 : movable.length < 2;
+  });
   if (sel.length === 1) {
     const s = sel[0];
     info.innerHTML = `<b>${KIND_LABEL[s.kind] || s.kind}</b> · <span class="mono">${escapeHtml(String(s.id).slice(0, 12))}</span><br>
@@ -423,6 +455,13 @@ $('selection-actions').querySelectorAll('[data-act]').forEach((btn) => {
     if (act === 'dup') tools.duplicate();
     if (act === 'del') tools.deleteSelection();
     renderSelectionPanel();
+  };
+});
+$('arrange-panel').querySelectorAll('[data-arrange]').forEach((btn) => {
+  btn.onclick = () => {
+    tools.arrangeSelection(btn.dataset.arrange);
+    renderSelectionPanel();
+    afterLocalChange();
   };
 });
 
@@ -493,8 +532,9 @@ $('btn-help').onclick = () => {
           <td><kbd>Delete</kbd></td><td>删除选中</td></tr>
       <tr><td><kbd>↑↓←→</kbd></td><td>微移(Shift=10px)</td>
           <td><kbd>Ctrl+]</kbd> / <kbd>Ctrl+[</kbd></td><td>置顶 / 置底</td></tr>
-      <tr><td>双击空白</td><td>快速便签</td>
-          <td>双击图形</td><td>编辑文本(Enter 提交, Esc 取消)</td></tr>
+      <tr><td>多选后「排列」面板</td><td>六种对齐; 选 3 个以上可水平/垂直等距</td></tr>
+      <tr><td>双击空白</td><td>快速便签</td></tr>
+      <tr><td>双击图形</td><td>编辑文本(Enter 提交, Esc 取消)</td></tr>
     </table>`,
   });
 };

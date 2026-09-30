@@ -43,6 +43,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from . import auth, chat as chat_mod, config
 from .boards import manager
+from .crdt import without_transient_ops
 from .history import history_service
 from .models import limit_catchup
 
@@ -356,9 +357,14 @@ class ConnectionManager:
         acks = [{"op_id": op["op_id"], "rev": op.get("rev"),
                  **({"dup": True} if op.get("dup") else {})} for op in accepted]
         await self.send(client, {"type": "ack", "acks": acks, "head_rev": head_rev})
-        fresh = [op for op in accepted if not op.get("dup") and op.get("type") != "move"]
+        # 幂等重发只回 ack, 不再广播; 实时拖拽帧(transient)只广播给当前在线
+        # 协作者, 不进 ring/日志; 普通 move 与对齐/分布批次完整持久化。
+        fresh = [op for op in accepted if not op.get("dup")]
+        durable = [d for op in fresh
+                   if (d := without_transient_ops(op)) is not None]
+        if durable:
+            room.remember(durable)
         if fresh:
-            room.remember(fresh)
             await self.broadcast(client.board_id, {
                 "type": "ops", "ops": fresh, "head_rev": head_rev,
                 "by": client.user.get("username"),

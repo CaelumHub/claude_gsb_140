@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException
 
 from . import auth, config
-from .crdt import BoardDoc, validate_op
+from .crdt import BoardDoc, validate_op, without_transient_ops
 from .history import history_service
 from .models import (BoardCreateReq, BoardPatchReq, DuplicateReq,
                      PermissionsReq)
@@ -153,7 +153,7 @@ class BoardManager:
                 doc.import_state(snapshot)
             base_rev = doc.head_rev
             max_rev = base_rev
-            for raw in hist.iter_ops(from_rev=base_rev + 1):
+            for raw in hist.iter_ops(from_rev=base_rev):
                 clean = validate_op(raw)
                 if clean:
                     doc.apply_op(clean)
@@ -223,7 +223,8 @@ class BoardManager:
                 accepted.append(clean)
             if accepted:
                 hist = history_service.for_board(board_id)
-                stamped = [op for op in accepted if "rev" in op and op.get("type") != "move"]
+                stamped = [durable for op in accepted
+                           if (durable := without_transient_ops(op)) is not None]
                 await asyncio.get_running_loop().run_in_executor(
                     None, hist.append_ops, stamped)
                 meta = self.metas.get(board_id)

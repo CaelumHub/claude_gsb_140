@@ -253,8 +253,12 @@ export class CrdtClient {
     return this._envelope('add_shape', { shape: quantizeShape(shape) }, baseRev);
   }
 
-  move(id, dx, dy, baseRev = 0) {
-    return this._envelope('move', { id, dx: q6(dx), dy: q6(dy) }, baseRev);
+  move(id, dx, dy, baseRevOrTransient = 0, transient = false) {
+    const baseRev = typeof baseRevOrTransient === 'boolean' ? 0 : baseRevOrTransient;
+    const isTransient = transient || baseRevOrTransient === true;
+    const payload = { id, dx: q6(dx), dy: q6(dy) };
+    if (isTransient) payload.transient = true;
+    return this._envelope('move', payload, baseRev);
   }
 
   setProps(id, props, baseRev = 0) {

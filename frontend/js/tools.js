@@ -11,10 +11,11 @@
    - 手绘: add_shape 起笔 → 节流 path_extend 续笔 → 收笔抽稀;
    - 双击: 便签/文本/图形 进入内联文本编辑(textarea 覆盖画布);
    - 键盘: Delete 删除, Ctrl+Z/Y 撤销重做, Ctrl+C/V/D 复制粘贴,
-     方向键微移, Ctrl+] / Ctrl+[ 层级调整。
+     方向键微移, Ctrl+] / Ctrl+[ 层级调整;
+   - 多选: 六种对齐 + 水平/垂直等间距分布, 一个 batch 即一个撤销单元。
    ================================================================ */
 import {
-  bboxOf, centerOf, createShape, nextZ, syncZCounter, uidShape,
+  bboxOf, centerOf, createShape, nextZ, shapesBbox, syncZCounter, uidShape,
 } from './shapes.js';
 
 function stripPrivate(shape) {
@@ -369,7 +370,7 @@ export class ToolManager {
           const dx = drag.accum.dx - drag.sent.dx;
           const dy = drag.accum.dy - drag.sent.dy;
           if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-            const ops = drag.ids.map((id) => this.crdt.move(id, dx, dy));
+            const ops = drag.ids.map((id) => this.crdt.move(id, dx, dy, 0, true));
             this._sendRaw(ops);
             drag.sent = { dx: drag.accum.dx, dy: drag.accum.dy };
             drag.lastSend = now;
@@ -467,7 +468,7 @@ export class ToolManager {
           const dx = drag.accum.dx - drag.sent.dx;
           const dy = drag.accum.dy - drag.sent.dy;
           if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-            this._sendRaw(drag.ids.map((id) => this.crdt.move(id, dx, dy)));
+            this._sendRaw(drag.ids.map((id) => this.crdt.move(id, dx, dy, 0, true)));
           }
           // 撤销栈: 一步撤销整个拖动(逆操作 = 每个图形的反向累计位移)
           const undoOps = drag.ids.map((id) => ({ type: 'move', id, dx: -drag.accum.dx, dy: -drag.accum.dy }));
@@ -764,6 +765,83 @@ export class ToolManager {
       this.crdt.commit(this.shapes, ops, { label: where === 'front' ? '置顶' : '置底' });
       this.engine.markDirty('main');
     }
+  }
+
+  /**
+   * 对齐 / 均匀分布当前选区。
+   * 每个图形只发布各自的 move 增量, 并作为一个 batch 提交:
+   * - 一次按钮操作对应一个撤销单元;
+   * - move 增量可交换, 与其他协作者的并发移动按 CRDT 语义合成, 不会覆盖。
+   */
+  arrangeSelection(kind) {
+    if (this.readOnly) return false;
+    const items = [...this.engine.selection]
+      .map((id) => this.shapes.get(id))
+      .filter((s) => s && !s.deleted && s.kind !== 'ghost' && s.kind !== 'edge')
+      .map((shape) => ({ shape, b: bboxOf(shape) }));
+    const minimum = kind.startsWith('distribute') ? 3 : 2;
+    if (items.length < minimum) return false;
+
+    const group = shapesBbox(items.map((item) => item.shape));
+    const groupCx = (group.x0 + group.x1) / 2;
+    const groupCy = (group.y0 + group.y1) / 2;
+    const moves = new Map();
+    const setMove = (shape, dx, dy) => moves.set(shape.id, { dx, dy });
+
+    for (const item of items) {
+      const { shape, b } = item;
+      const cx = (b.x0 + b.x1) / 2;
+      const cy = (b.y0 + b.y1) / 2;
+      if (kind === 'left') setMove(shape, group.x0 - b.x0, 0);
+      else if (kind === 'center-h') setMove(shape, groupCx - cx, 0);
+      else if (kind === 'right') setMove(shape, group.x1 - b.x1, 0);
+      else if (kind === 'top') setMove(shape, 0, group.y0 - b.y0);
+      else if (kind === 'center-v') setMove(shape, 0, groupCy - cy);
+      else if (kind === 'bottom') setMove(shape, 0, group.y1 - b.y1);
+    }
+
+    if (kind === 'distribute-h' || kind === 'distribute-v') {
+      const horizontal = kind === 'distribute-h';
+      const sorted = [...items].sort((a, c) => {
+        const aStart = horizontal ? a.b.x0 : a.b.y0;
+        const cStart = horizontal ? c.b.x0 : c.b.y0;
+        const aCenter = horizontal
+          ? (a.b.x0 + a.b.x1) / 2 : (a.b.y0 + a.b.y1) / 2;
+        const cCenter = horizontal
+          ? (c.b.x0 + c.b.x1) / 2 : (c.b.y0 + c.b.y1) / 2;
+        return (aStart - cStart) || (aCenter - cCenter)
+          || String(a.shape.id).localeCompare(String(c.shape.id));
+      });
+      const totalSpan = horizontal ? group.x1 - group.x0 : group.y1 - group.y0;
+      const totalSize = sorted.reduce((sum, item) => sum + (
+        horizontal ? item.b.x1 - item.b.x0 : item.b.y1 - item.b.y0), 0);
+      const gap = (totalSpan - totalSize) / (sorted.length - 1);
+      let cursor = horizontal ? group.x0 : group.y0;
+      for (const item of sorted) {
+        const size = horizontal ? item.b.x1 - item.b.x0 : item.b.y1 - item.b.y0;
+        if (horizontal) setMove(item.shape, cursor - item.b.x0, 0);
+        else setMove(item.shape, 0, cursor - item.b.y0);
+        cursor += size + gap;
+      }
+    }
+
+    const labels = {
+      left: '左对齐', 'center-h': '水平居中', right: '右对齐',
+      top: '顶对齐', 'center-v': '垂直居中', bottom: '底对齐',
+      'distribute-h': '水平等距分布', 'distribute-v': '垂直等距分布',
+    };
+    const ops = [];
+    for (const [id, delta] of moves) {
+      if (Math.abs(delta.dx) > 1e-6 || Math.abs(delta.dy) > 1e-6) {
+        ops.push(this.crdt.move(id, delta.dx, delta.dy));
+      }
+    }
+    if (!ops.length) return false;
+
+    const touched = this.crdt.commit(this.shapes, ops, { label: labels[kind] || '排列' });
+    this.engine.onShapesChanged(new Set(ops.map((op) => op.id)));
+    if (this.opts.onHistoryChange) this.opts.onHistoryChange();
+    return !!touched;
   }
 
   /* ------------------------------------------------------------ 文本编辑 */
